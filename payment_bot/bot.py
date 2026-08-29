@@ -98,8 +98,12 @@ def _validate_amount(text: str) -> tuple[bool, Optional[Decimal], str]:
     if isinstance(exponent, int) and exponent < -config.MAX_DECIMAL_PLACES:
         return False, None, f"Maximum {config.MAX_DECIMAL_PLACES} decimal places allowed."
 
-    # Normalise (remove trailing zeros for display while keeping precision)
-    amount = amount.quantize(Decimal("0.01")) if exponent and exponent < 0 else amount
+    # Normalise — strip trailing fractional zeros for cleaner display / UPI URLs
+    # e.g. "10.50" → "10.5", "10" stays "10"  (avoids Decimal.normalize()'s "1E+1")
+    s = format(amount, 'f')
+    if '.' in s:
+        s = s.rstrip('0').rstrip('.')
+    amount = Decimal(s)
 
     return True, amount, ""
 
