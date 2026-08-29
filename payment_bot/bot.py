@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import string
+import threading
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -546,10 +547,8 @@ async def fallback_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # Application entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main() -> None:
-    """Initialise the database and start the Telegram bot in polling mode."""
-    database.init_db()
-
+def _build_application() -> Application:
+    """Build the Telegram Application with all handlers registered."""
     app = Application.builder().token(config.BOT_TOKEN).build()
 
     # ── Conversation handler (amount entry) ──────────────────────────────
@@ -581,8 +580,96 @@ def main() -> None:
     # ── Standalone callback handler for verify (works outside conversation) ──
     app.add_handler(CallbackQueryHandler(cb_verify_payment, pattern=r"^verify_"))
 
-    logger.info("Bot started — polling mode")
-    app.run_polling(drop_pending_updates=True)
+    return app
+
+
+# ── Webhook mode (Render production) ─────────────────────────────────────────
+
+def _run_webhook() -> None:
+    """
+    Start the bot in webhook mode behind a Flask server.
+
+    Flask serves:
+      GET  /health        → health check for Render
+      POST /<BOT_TOKEN>   → Telegram webhook updates
+
+    A background thread runs the python-telegram-bot event loop to process
+    incoming updates forwarded from the Flask route.
+    """
+    from flask import Flask, request, Response
+
+    webhook_url = f"{config.RENDER_EXTERNAL_URL}/{config.BOT_TOKEN}"
+    logger.info("Webhook mode — URL: %s", webhook_url.split('/')[0] + '//***')
+
+    # Create a dedicated event loop for the bot on a background thread
+    loop = asyncio.new_event_loop()
+    application = _build_application()
+
+    async def _startup() -> None:
+        """Initialize the application and register the webhook with Telegram."""
+        await application.initialize()
+        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        await application.start()
+        logger.info("Telegram webhook registered successfully")
+
+    loop.run_until_complete(_startup())
+
+    # Run the event loop in a daemon thread so it can process updates
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    bot_thread = threading.Thread(target=_run_loop, daemon=True)
+    bot_thread.start()
+
+    # ── Flask app ────────────────────────────────────────────────────────
+    flask_app = Flask(__name__)
+
+    @flask_app.route("/health", methods=["GET"])
+    def health():
+        return Response("OK", status=200)
+
+    @flask_app.route(f"/{config.BOT_TOKEN}", methods=["POST"])
+    def telegram_webhook():
+        """Receive Telegram updates via webhook and forward to the bot."""
+        update_data = request.get_json(force=True)
+        update = Update.de_json(update_data, application.bot)
+
+        # Schedule processing on the bot's event loop
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update), loop
+        )
+        return Response("ok", status=200)
+
+    logger.info("Starting Flask on port %s", config.PORT)
+    flask_app.run(host="0.0.0.0", port=config.PORT)
+
+
+# ── Polling mode (local development) ─────────────────────────────────────────
+
+def _run_polling() -> None:
+    """Start the bot in long-polling mode for local development."""
+    application = _build_application()
+    logger.info("Bot started — polling mode (LOCAL_MODE=true)")
+    application.run_polling(drop_pending_updates=True)
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Initialise the database and start the bot in the appropriate mode."""
+    database.init_db()
+
+    if config.LOCAL_MODE:
+        _run_polling()
+    else:
+        if not config.RENDER_EXTERNAL_URL:
+            logger.critical(
+                "RENDER_EXTERNAL_URL is required when LOCAL_MODE is not true. "
+                "Set it in your Render environment variables."
+            )
+            raise SystemExit(1)
+        _run_webhook()
 
 
 if __name__ == "__main__":

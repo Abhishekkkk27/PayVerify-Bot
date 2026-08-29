@@ -41,5 +41,10 @@ MIN_AMOUNT = 1           # INR
 MAX_AMOUNT = 100_000     # INR
 MAX_DECIMAL_PLACES = 2
 
+# ── Deployment mode ──────────────────────────────────────────────────────────
+LOCAL_MODE: bool = os.getenv("LOCAL_MODE", "false").strip().lower() in ("true", "1", "yes")
+PORT: int = int(os.getenv("PORT", "10000"))
+RENDER_EXTERNAL_URL: str = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
 # ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH: str = os.getenv("DB_PATH", "payments.db")
